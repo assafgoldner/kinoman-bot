@@ -46,12 +46,19 @@ def _handle_interactive(sender: str, message: dict) -> None:
         session = _sessions[sender]
         for opt in session.get("options", []):
             if opt["id"] == selected_id:
-                # User chose a movie — get full details
-                details = movie_client.get_movie_details(opt["tmdb_id"])
-                if details:
-                    response = movie_client.format_movie_response(details)
+                # User chose an option — get full details based on media type
+                if opt.get("media_type") == "tv":
+                    details = movie_client.get_tv_details(opt["tmdb_id"])
+                    if details:
+                        response = movie_client.format_tv_response(details)
+                    else:
+                        response = "מצטער, לא הצלחתי למצוא מידע על הסדרה. נסה שוב 🙏"
                 else:
-                    response = "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏"
+                    details = movie_client.get_movie_details(opt["tmdb_id"])
+                    if details:
+                        response = movie_client.format_movie_response(details)
+                    else:
+                        response = "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏"
                 whatsapp_client.send_text(sender, response)
                 del _sessions[sender]
                 return
@@ -71,66 +78,89 @@ def _handle_text(sender: str, message: dict) -> None:
         idx = int(user_text) - 1
         options = session.get("options", [])
         if idx < len(options):
-            details = movie_client.get_movie_details(options[idx]["tmdb_id"])
-            if details:
-                response = movie_client.format_movie_response(details)
+            opt = options[idx]
+            if opt.get("media_type") == "tv":
+                details = movie_client.get_tv_details(opt["tmdb_id"])
+                if details:
+                    response = movie_client.format_tv_response(details)
+                else:
+                    response = "מצטער, לא הצלחתי למצוא מידע על הסדרה. נסה שוב 🙏"
             else:
-                response = "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏"
+                details = movie_client.get_movie_details(opt["tmdb_id"])
+                if details:
+                    response = movie_client.format_movie_response(details)
+                else:
+                    response = "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏"
             whatsapp_client.send_text(sender, response)
             del _sessions[sender]
             return
 
-    # Search for movies — try direct title search first
-    results = movie_client.search_movie(user_text)
+    # Search for movies & TV shows — try direct title search first
+    results = movie_client.search_multi(user_text)
 
     # If no results and text looks like a description, use LLM to guess
     if not results and movie_client.is_description(user_text):
         guesses = movie_client.guess_movie_from_description(user_text)
         for guess in guesses:
-            results = movie_client.search_movie(guess)
+            results = movie_client.search_multi(guess)
             if results:
                 break
 
     if not results:
         whatsapp_client.send_text(
             sender,
-            "לא מצאתי סרט מתאים. נסה לתאר אחרת או לחפש בשם 🙏",
+            "לא מצאתי סרט או סדרה מתאימים. נסה לתאר אחרת או לחפש בשם 🙏",
         )
         return
 
     if len(results) == 1:
         # Single match — show full details
-        details = movie_client.get_movie_details(results[0]["id"])
-        if details:
-            whatsapp_client.send_text(
-                sender, movie_client.format_movie_response(details)
-            )
+        r = results[0]
+        if r.get("media_type") == "tv":
+            details = movie_client.get_tv_details(r["id"])
+            if details:
+                whatsapp_client.send_text(
+                    sender, movie_client.format_tv_response(details)
+                )
+            else:
+                whatsapp_client.send_text(
+                    sender, "מצטער, לא הצלחתי למצוא מידע על הסדרה. נסה שוב 🙏"
+                )
         else:
-            whatsapp_client.send_text(
-                sender, "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏"
-            )
+            details = movie_client.get_movie_details(r["id"])
+            if details:
+                whatsapp_client.send_text(
+                    sender, movie_client.format_movie_response(details)
+                )
+            else:
+                whatsapp_client.send_text(
+                    sender, "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏"
+                )
         return
 
     # Multiple matches — present options
     options = []
-    seen_titles = set()
     for i, r in enumerate(results[:3]):
         title_display = r["title"]
         if r["original_title"] and r["original_title"] != r["title"]:
             title_display = f"{r['title']} / {r['original_title']}"
         year_suffix = f" ({r['year']})" if r["year"] else ""
 
+        # Add emoji indicator for media type
+        icon = "📺" if r.get("media_type") == "tv" else "🎬"
+
         # Always show year in button title to help distinguish results
         if r["year"]:
-            btn_title = f"{r['title'][:14]} ({r['year']})"[:20]
+            btn_title = f"{icon}{r['title'][:12]} ({r['year']})"[:20]
         else:
-            btn_title = r["title"][:20]
+            btn_title = f"{icon}{r['title'][:18]}"[:20]
 
         options.append({
             "id": f"option_{i + 1}",
             "title": btn_title,
             "full_text": f"{title_display}{year_suffix}",
             "tmdb_id": r["id"],
+            "media_type": r.get("media_type", "movie"),
         })
 
     # Store session
@@ -151,7 +181,7 @@ def _handle_text(sender: str, message: dict) -> None:
         whatsapp_client.send_list(
             sender,
             body_text,
-            "בחר סרט",
+            "בחר סרט / סדרה",
             [{"id": opt["id"], "title": opt["title"]} for opt in options],
         )
 

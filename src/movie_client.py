@@ -1,5 +1,5 @@
 """
-Movie client — uses TMDB and OMDb APIs for movie search, details, and ratings.
+Movie & TV client — uses TMDB and OMDb APIs for movie/TV search, details, and ratings.
 """
 
 from __future__ import annotations
@@ -16,15 +16,15 @@ OMDB_BASE = "https://www.omdbapi.com"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
-def search_movie(query: str) -> list[dict]:
+def search_multi(query: str) -> list[dict]:
     """
-    Search for movies by name.
+    Search for movies and TV shows by name using TMDB's multi search.
 
-    Returns list of dicts with keys: id, title, original_title, year, overview.
+    Returns list of dicts with keys: id, title, original_title, year, media_type.
     """
     try:
         resp = requests.get(
-            f"{TMDB_BASE}/search/movie",
+            f"{TMDB_BASE}/search/multi",
             params={
                 "api_key": TMDB_API_KEY,
                 "query": query,
@@ -39,15 +39,36 @@ def search_movie(query: str) -> list[dict]:
         return []
 
     results = resp.json().get("results", [])
-    return [
-        {
-            "id": r["id"],
-            "title": r.get("title", ""),
-            "original_title": r.get("original_title", ""),
-            "year": (r.get("release_date") or "")[:4],
-        }
-        for r in results[:5]
-    ]
+    out = []
+    for r in results:
+        media_type = r.get("media_type")
+        if media_type not in ("movie", "tv"):
+            continue
+        if media_type == "movie":
+            out.append({
+                "id": r["id"],
+                "title": r.get("title", ""),
+                "original_title": r.get("original_title", ""),
+                "year": (r.get("release_date") or "")[:4],
+                "media_type": "movie",
+            })
+        else:
+            out.append({
+                "id": r["id"],
+                "title": r.get("name", ""),
+                "original_title": r.get("original_name", ""),
+                "year": (r.get("first_air_date") or "")[:4],
+                "media_type": "tv",
+            })
+        if len(out) >= 5:
+            break
+    return out
+
+
+# Keep old name as alias for backward compatibility with guess flow
+def search_movie(query: str) -> list[dict]:
+    """Search using multi endpoint (backward-compatible wrapper)."""
+    return search_multi(query)
 
 
 def get_movie_details(tmdb_id: int) -> dict | None:
@@ -168,6 +189,175 @@ def get_movie_details(tmdb_id: int) -> dict | None:
     }
 
 
+def get_tv_details(tmdb_id: int) -> dict | None:
+    """
+    Get full TV show details from TMDB + ratings from OMDb.
+
+    Returns a dict with all info needed for formatting, or None on error.
+    """
+    try:
+        details_resp = requests.get(
+            f"{TMDB_BASE}/tv/{tmdb_id}",
+            params={"api_key": TMDB_API_KEY, "language": "he"},
+            timeout=10,
+        )
+        details_resp.raise_for_status()
+        details = details_resp.json()
+
+        credits_resp = requests.get(
+            f"{TMDB_BASE}/tv/{tmdb_id}/credits",
+            params={"api_key": TMDB_API_KEY, "language": "he"},
+            timeout=10,
+        )
+        credits_resp.raise_for_status()
+        credits = credits_resp.json()
+
+        similar_resp = requests.get(
+            f"{TMDB_BASE}/tv/{tmdb_id}/similar",
+            params={"api_key": TMDB_API_KEY, "language": "he"},
+            timeout=10,
+        )
+        similar_resp.raise_for_status()
+        similar = similar_resp.json().get("results", [])[:3]
+
+        # Get IMDb ID via external_ids
+        ext_resp = requests.get(
+            f"{TMDB_BASE}/tv/{tmdb_id}/external_ids",
+            params={"api_key": TMDB_API_KEY},
+            timeout=10,
+        )
+        ext_resp.raise_for_status()
+        imdb_id = ext_resp.json().get("imdb_id")
+
+    except requests.RequestException as e:
+        logger.error("TMDB TV details error: %s", e)
+        return None
+
+    omdb_data = {}
+    if imdb_id and OMDB_API_KEY:
+        try:
+            omdb_resp = requests.get(
+                OMDB_BASE,
+                params={"apikey": OMDB_API_KEY, "i": imdb_id},
+                timeout=10,
+            )
+            omdb_resp.raise_for_status()
+            omdb_data = omdb_resp.json()
+        except requests.RequestException as e:
+            logger.error("OMDb error: %s", e)
+
+    cast = credits.get("cast", [])[:5]
+    cast_list = [
+        {"name": c.get("name", ""), "character": c.get("character", "")}
+        for c in cast
+    ]
+
+    genres = [g["name"] for g in details.get("genres", [])]
+    countries = [c["name"] for c in details.get("production_countries", [])]
+    languages = [l["name"] for l in details.get("spoken_languages", [])]
+
+    creators = [c["name"] for c in details.get("created_by", [])]
+
+    imdb_rating = omdb_data.get("imdbRating", "N/A")
+    rt_rating = "N/A"
+    metacritic = omdb_data.get("Metascore", "N/A")
+    for rating in omdb_data.get("Ratings", []):
+        if rating["Source"] == "Rotten Tomatoes":
+            rt_rating = rating["Value"]
+    awards = omdb_data.get("Awards", "")
+    if awards in ("N/A", ""):
+        awards = None
+
+    similar_names = []
+    for s in similar:
+        name = s.get("name") or s.get("original_name", "")
+        if name:
+            similar_names.append(name)
+
+    status_map = {
+        "Returning Series": "בשידור",
+        "Ended": "הסתיים",
+        "Canceled": "בוטל",
+        "In Production": "בהפקה",
+    }
+    raw_status = details.get("status", "")
+    status = status_map.get(raw_status, raw_status)
+
+    return {
+        "hebrew_title": details.get("name", ""),
+        "original_title": details.get("original_name", ""),
+        "year": (details.get("first_air_date") or "")[:4],
+        "genres": ", ".join(genres) if genres else "N/A",
+        "seasons": details.get("number_of_seasons", "N/A"),
+        "episodes": details.get("number_of_episodes", "N/A"),
+        "status": status,
+        "countries": ", ".join(countries) if countries else "N/A",
+        "languages": ", ".join(languages) if languages else "N/A",
+        "imdb_rating": imdb_rating,
+        "rt_rating": rt_rating,
+        "metacritic": metacritic,
+        "cast": cast_list,
+        "creators": ", ".join(creators) if creators else "N/A",
+        "overview": details.get("overview") or "אין תקציר זמין",
+        "awards": awards,
+        "similar": similar_names,
+    }
+
+
+def format_tv_response(d: dict) -> str:
+    """Format TV show details into the Hebrew response template."""
+    cast_lines = []
+    for c in d["cast"]:
+        if c["character"]:
+            cast_lines.append(f"• {c['name']} — בתפקיד {c['character']}")
+        else:
+            cast_lines.append(f"• {c['name']}")
+    cast_str = "\n".join(cast_lines) if cast_lines else "N/A"
+
+    similar_str = ", ".join(d["similar"]) if d["similar"] else "N/A"
+
+    verdict = _get_verdict(d)
+
+    lines = [
+        f"📺 {d['hebrew_title']} / {d['original_title']} ({d['year']})",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"⭐  IMDb:  {d['imdb_rating']}/10",
+        f"🍅  Rotten Tomatoes:  {d['rt_rating']}",
+        f"Ⓜ️  Metacritic:  {d['metacritic']}/100",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    if verdict:
+        lines.append(f"      {verdict}")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    lines += [
+        "",
+        f"🎭 ז'אנר: {d['genres']}",
+        f"📺 עונות: {d['seasons']} | פרקים: {d['episodes']}",
+        f"📡 סטטוס: {d['status']}",
+        f"🌍 מדינה / שפה: {d['countries']} / {d['languages']}",
+        "",
+        "🎭 שחקנים ראשיים:",
+        cast_str,
+        "",
+        f"🎬 יוצר: {d['creators']}",
+        "",
+        "📝 תקציר:",
+        d["overview"],
+    ]
+
+    if d["awards"]:
+        lines.append("")
+        lines.append(f"🏆 פרסים בולטים: {d['awards']}")
+
+    lines.append("")
+    lines.append(f"🍿 אם אהבת את זה: {similar_str}")
+
+    return "\n".join(lines)
+
+
 def is_description(text: str) -> bool:
     """Heuristic: if the text is long or has multiple words, it's likely a description."""
     words = text.split()
@@ -197,11 +387,11 @@ def guess_movie_from_description(description: str) -> list[str]:
                     {
                         "role": "system",
                         "content": (
-                            "You are a movie identification assistant. "
-                            "The user will describe a movie plot, characters, actors, or scenes. "
-                            "Reply ONLY with the most likely movie title(s) in English, one per line. "
+                            "You are a movie and TV show identification assistant. "
+                            "The user will describe a movie or TV show plot, characters, actors, or scenes. "
+                            "Reply ONLY with the most likely movie or TV show title(s) in English, one per line. "
                             "Maximum 3 guesses, most likely first. "
-                            "No explanations, no numbering, just the movie titles."
+                            "No explanations, no numbering, just the titles."
                         ),
                     },
                     {"role": "user", "content": description},
