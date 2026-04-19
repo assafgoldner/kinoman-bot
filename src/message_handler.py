@@ -113,14 +113,22 @@ def _handle_text(sender: str, message: dict) -> None:
 
     # Multiple matches — present options
     options = []
+    seen_titles = set()
     for i, r in enumerate(results[:3]):
         title_display = r["title"]
         if r["original_title"] and r["original_title"] != r["title"]:
             title_display = f"{r['title']} / {r['original_title']}"
         year_suffix = f" ({r['year']})" if r["year"] else ""
+
+        # Ensure unique button titles (WhatsApp rejects duplicates)
+        btn_title = r["title"][:20]
+        if btn_title in seen_titles and r["year"]:
+            btn_title = f"{r['title'][:15]} ({r['year']})"[:20]
+        seen_titles.add(btn_title)
+
         options.append({
             "id": f"option_{i + 1}",
-            "title": r["title"][:20],
+            "title": btn_title,
             "full_text": f"{title_display}{year_suffix}",
             "tmdb_id": r["id"],
         })
