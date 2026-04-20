@@ -11,6 +11,13 @@ import whatsapp_client
 
 logger = logging.getLogger("kinoman.handler")
 
+
+def _send_details(sender: str, details: dict, formatter) -> None:
+    """Send poster image (if available) followed by formatted text."""
+    if details.get("poster_url"):
+        whatsapp_client.send_image(sender, details["poster_url"])
+    whatsapp_client.send_text(sender, formatter(details))
+
 # ── In-memory session store ─────────────────────────────────────────
 # Maps sender phone → {"options": [...], "timestamp": "..."}
 # In production, replace with Redis / Firestore for persistence.
@@ -50,16 +57,15 @@ def _handle_interactive(sender: str, message: dict) -> None:
                 if opt.get("media_type") == "tv":
                     details = movie_client.get_tv_details(opt["tmdb_id"])
                     if details:
-                        response = movie_client.format_tv_response(details)
+                        _send_details(sender, details, movie_client.format_tv_response)
                     else:
-                        response = "מצטער, לא הצלחתי למצוא מידע על הסדרה. נסה שוב 🙏"
+                        whatsapp_client.send_text(sender, "מצטער, לא הצלחתי למצוא מידע על הסדרה. נסה שוב 🙏")
                 else:
                     details = movie_client.get_movie_details(opt["tmdb_id"])
                     if details:
-                        response = movie_client.format_movie_response(details)
+                        _send_details(sender, details, movie_client.format_movie_response)
                     else:
-                        response = "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏"
-                whatsapp_client.send_text(sender, response)
+                        whatsapp_client.send_text(sender, "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏")
                 del _sessions[sender]
                 return
 
@@ -82,16 +88,15 @@ def _handle_text(sender: str, message: dict) -> None:
             if opt.get("media_type") == "tv":
                 details = movie_client.get_tv_details(opt["tmdb_id"])
                 if details:
-                    response = movie_client.format_tv_response(details)
+                    _send_details(sender, details, movie_client.format_tv_response)
                 else:
-                    response = "מצטער, לא הצלחתי למצוא מידע על הסדרה. נסה שוב 🙏"
+                    whatsapp_client.send_text(sender, "מצטער, לא הצלחתי למצוא מידע על הסדרה. נסה שוב 🙏")
             else:
                 details = movie_client.get_movie_details(opt["tmdb_id"])
                 if details:
-                    response = movie_client.format_movie_response(details)
+                    _send_details(sender, details, movie_client.format_movie_response)
                 else:
-                    response = "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏"
-            whatsapp_client.send_text(sender, response)
+                    whatsapp_client.send_text(sender, "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏")
             del _sessions[sender]
             return
 
@@ -119,45 +124,45 @@ def _handle_text(sender: str, message: dict) -> None:
         if r.get("media_type") == "tv":
             details = movie_client.get_tv_details(r["id"])
             if details:
-                whatsapp_client.send_text(
-                    sender, movie_client.format_tv_response(details)
-                )
+                _send_details(sender, details, movie_client.format_tv_response)
             else:
-                whatsapp_client.send_text(
-                    sender, "מצטער, לא הצלחתי למצוא מידע על הסדרה. נסה שוב 🙏"
-                )
+                whatsapp_client.send_text(sender, "מצטער, לא הצלחתי למצוא מידע על הסדרה. נסה שוב 🙏")
         else:
             details = movie_client.get_movie_details(r["id"])
             if details:
-                whatsapp_client.send_text(
-                    sender, movie_client.format_movie_response(details)
-                )
+                _send_details(sender, details, movie_client.format_movie_response)
             else:
-                whatsapp_client.send_text(
-                    sender, "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏"
-                )
+                whatsapp_client.send_text(sender, "מצטער, לא הצלחתי למצוא מידע על הסרט. נסה שוב 🙏")
         return
 
-    # Multiple matches — present options
+    # Multiple matches — present as list with full names and descriptions
     options = []
-    for i, r in enumerate(results[:3]):
+    body_lines = ["מצאתי כמה אפשרויות:"]
+    for i, r in enumerate(results[:5]):
         title_display = r["title"]
         if r["original_title"] and r["original_title"] != r["title"]:
             title_display = f"{r['title']} / {r['original_title']}"
         year_suffix = f" ({r['year']})" if r["year"] else ""
-
-        # Add emoji indicator for media type
         icon = "📺" if r.get("media_type") == "tv" else "🎬"
+        type_label = "סדרה" if r.get("media_type") == "tv" else "סרט"
 
-        # Always show year in button title to help distinguish results
-        if r["year"]:
-            btn_title = f"{icon}{r['title'][:12]} ({r['year']})"[:20]
-        else:
-            btn_title = f"{icon}{r['title'][:18]}"[:20]
+        # Full name in body text
+        body_lines.append(f"{i + 1}. {icon} {title_display}{year_suffix}")
+
+        # List row: title up to 24 chars, description up to 72 chars
+        row_title = f"{icon}{r['title']}"[:24]
+        overview = r.get("overview", "")
+        desc = f"{type_label}{year_suffix}"
+        if overview:
+            remaining = 72 - len(desc) - 3  # " | " separator
+            if remaining > 10:
+                desc += f" | {overview[:remaining]}"
+        desc = desc[:72]
 
         options.append({
             "id": f"option_{i + 1}",
-            "title": btn_title,
+            "title": row_title,
+            "description": desc,
             "full_text": f"{title_display}{year_suffix}",
             "tmdb_id": r["id"],
             "media_type": r.get("media_type", "movie"),
@@ -169,21 +174,14 @@ def _handle_text(sender: str, message: dict) -> None:
         "timestamp": datetime.utcnow().isoformat(),
     }
 
-    body_text = "מצאתי כמה אפשרויות — למה התכוונת?"
+    body_text = "\n".join(body_lines)
 
-    if len(options) <= 3:
-        whatsapp_client.send_buttons(
-            sender,
-            body_text,
-            [{"id": opt["id"], "title": opt["title"]} for opt in options],
-        )
-    else:
-        whatsapp_client.send_list(
-            sender,
-            body_text,
-            "בחר סרט / סדרה",
-            [{"id": opt["id"], "title": opt["title"]} for opt in options],
-        )
+    whatsapp_client.send_list(
+        sender,
+        body_text,
+        "בחר מהרשימה",
+        [{"id": opt["id"], "title": opt["title"], "description": opt["description"]} for opt in options],
+    )
 
 
 # ── Main entry point ────────────────────────────────────────────────

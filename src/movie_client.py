@@ -51,6 +51,7 @@ def search_multi(query: str) -> list[dict]:
                 "original_title": r.get("original_title", ""),
                 "year": (r.get("release_date") or "")[:4],
                 "media_type": "movie",
+                "overview": r.get("overview", ""),
             })
         else:
             out.append({
@@ -59,6 +60,7 @@ def search_multi(query: str) -> list[dict]:
                 "original_title": r.get("original_name", ""),
                 "year": (r.get("first_air_date") or "")[:4],
                 "media_type": "tv",
+                "overview": r.get("overview", ""),
             })
         if len(out) >= 5:
             break
@@ -169,6 +171,13 @@ def get_movie_details(tmdb_id: int) -> dict | None:
     original_title = details.get("original_title", "")
     hebrew_title = details.get("title", "")
 
+    # Poster URL
+    poster_path = details.get("poster_path")
+    poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+
+    # Fun facts
+    fun_facts = _collect_movie_facts(details, omdb_data)
+
     return {
         "hebrew_title": hebrew_title,
         "original_title": original_title,
@@ -186,6 +195,8 @@ def get_movie_details(tmdb_id: int) -> dict | None:
         "overview": details.get("overview") or "אין תקציר זמין",
         "awards": awards,
         "similar": similar_names,
+        "poster_url": poster_url,
+        "fun_facts": fun_facts,
     }
 
 
@@ -283,6 +294,13 @@ def get_tv_details(tmdb_id: int) -> dict | None:
     raw_status = details.get("status", "")
     status = status_map.get(raw_status, raw_status)
 
+    # Poster URL
+    poster_path = details.get("poster_path")
+    poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+
+    # Fun facts
+    fun_facts = _collect_tv_facts(details, omdb_data)
+
     return {
         "hebrew_title": details.get("name", ""),
         "original_title": details.get("original_name", ""),
@@ -301,6 +319,8 @@ def get_tv_details(tmdb_id: int) -> dict | None:
         "overview": details.get("overview") or "אין תקציר זמין",
         "awards": awards,
         "similar": similar_names,
+        "poster_url": poster_url,
+        "fun_facts": fun_facts,
     }
 
 
@@ -351,6 +371,12 @@ def format_tv_response(d: dict) -> str:
     if d["awards"]:
         lines.append("")
         lines.append(f"🏆 פרסים בולטים: {d['awards']}")
+
+    if d.get("fun_facts"):
+        lines.append("")
+        lines.append("💡 עובדות מעניינות:")
+        for fact in d["fun_facts"]:
+            lines.append(fact)
 
     lines.append("")
     lines.append(f"🍿 אם אהבת את זה: {similar_str}")
@@ -410,6 +436,57 @@ def guess_movie_from_description(description: str) -> list[str]:
     # Parse lines into movie titles
     titles = [line.strip().strip("-•*123.") .strip() for line in content.strip().split("\n")]
     return [t for t in titles if t][:3]
+
+
+# ── Fun facts helpers ─────────────────────────────────────────────
+
+def _format_money(amount: int) -> str:
+    """Format a dollar amount into a readable string."""
+    if amount >= 1_000_000_000:
+        return f"${amount / 1_000_000_000:.1f}B"
+    if amount >= 1_000_000:
+        return f"${amount / 1_000_000:.0f}M"
+    return f"${amount:,}"
+
+
+def _collect_movie_facts(details: dict, omdb_data: dict) -> list:
+    """Collect interesting facts about a movie."""
+    facts = []
+    tagline = details.get("tagline")
+    if tagline:
+        facts.append(f"🏷️ \"{tagline}\"")
+    budget = details.get("budget", 0)
+    revenue = details.get("revenue", 0)
+    if budget and revenue:
+        facts.append(f"💰 תקציב: {_format_money(budget)} | הכנסות: {_format_money(revenue)}")
+    elif budget:
+        facts.append(f"💰 תקציב: {_format_money(budget)}")
+    vote_count = details.get("vote_count", 0)
+    if vote_count > 1000:
+        facts.append(f"📊 {vote_count:,} הצבעות ב-TMDB")
+    box_office = omdb_data.get("BoxOffice", "N/A")
+    if box_office not in ("N/A", "") and not revenue:
+        facts.append(f"💰 Box Office: {box_office}")
+    return facts
+
+
+def _collect_tv_facts(details: dict, omdb_data: dict) -> list:
+    """Collect interesting facts about a TV show."""
+    facts = []
+    tagline = details.get("tagline")
+    if tagline:
+        facts.append(f"🏷️ \"{tagline}\"")
+    first = (details.get("first_air_date") or "")[:4]
+    last = (details.get("last_air_date") or "")[:4]
+    if first and last and first != last:
+        facts.append(f"📅 שודר: {first}–{last}")
+    networks = [n.get("name", "") for n in details.get("networks", [])]
+    if networks:
+        facts.append(f"📡 רשת: {', '.join(networks)}")
+    vote_count = details.get("vote_count", 0)
+    if vote_count > 1000:
+        facts.append(f"📊 {vote_count:,} הצבעות ב-TMDB")
+    return facts
 
 
 # ── Genre-based rating thresholds ──────────────────────────────────
@@ -535,6 +612,12 @@ def format_movie_response(d: dict) -> str:
     if d["awards"]:
         lines.append("")
         lines.append(f"🏆 פרסים בולטים: {d['awards']}")
+
+    if d.get("fun_facts"):
+        lines.append("")
+        lines.append("💡 עובדות מעניינות:")
+        for fact in d["fun_facts"]:
+            lines.append(fact)
 
     lines.append("")
     lines.append(f"🍿 אם אהבת את זה: {similar_str}")

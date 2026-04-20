@@ -63,6 +63,19 @@ def send_text(to: str, text: str) -> None:
         })
 
 
+def send_image(to: str, image_url: str, caption: str = "") -> None:
+    """Send an image message by URL."""
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "image",
+        "image": {"link": image_url},
+    }
+    if caption:
+        payload["image"]["caption"] = caption[:1024]
+    _send(payload)
+
+
 def send_buttons(to: str, body_text: str, buttons: list[dict]) -> None:
     """
     Send an interactive reply-buttons message.
